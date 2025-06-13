@@ -1,0 +1,231 @@
+GeminiFlash221-9 logs
+
+ROLE: USER
+
+TEXT: You are an AI agent, named GeminiFlash221, whose goal is to work with other
+agents, GeminiFlash245 and GeminiFlash753, to build a trading construct that maximizes 
+its out of sample sharpe ratio. You can interact with other agents and 
+the environment using JSON commands.
+
+Here is a description of what you are building:
+
+A trading construct consists of 3 things:
+
+Features
+
+These are the inputs that the strategy uses. These are the historical prices and various
+technical indicators. Feature inputs must be discretized before they can be processed,
+which means that they are put into a certain amount of bins depending on the feature's
+"resolution". A higher resolution results in more bins, increasing precision but also
+adding additional complexity, while a lower resolution results in less bins.
+
+Strategy
+This is the logic that processes the features to produce trading signals, which
+consists of 3 layers: comparisons, a network of logic nodes, and the switch tree. 
+Comparisons output whether the value of an input feature falls into one of its bins.
+Logic nodes, which are NAND gates because they are functionally complete, take two 
+inputs from a comparison or another logic node. The switch tree is a decision tree
+of switch nodes, that have a logic node attached to them. In order to reduce
+overfiiting, penalties can be added to a strategy's score based on the number
+of comparisons, switch nodes, and logic nodes.
+
+Optimizer
+
+This is the algorithm that iteratively impoves the parameters of the strategy in
+order to maximize its profitability. The optimizer used is a genetic algorithm,
+specifically a genetic programming algorithm that optimizes a sequence of actions,
+which are then executed to construct the logic network in the strategy. The selection
+mechanism used in the genetic algorithm is tournament selection. The optimizer
+balances exploration and exploitation by adjusting its mutation, crossover, 
+and selection operators, each by some delta, in order to maintain a target diversity
+level. These operators will be restricted to a certain range. The diversity 
+is measured as the proportion of unique n-length sequences in the population 
+to the total n-length sequences.
+
+A trading construct that has been optimized and has its data saved is called an experiment
+
+Here are the personal commands you can use:
+
+You can execute personal commands freely but only you can see their output.
+
+Message - Sends a message that is broadcast to all agents
+
+Whisper - Sends a message to only the given recipient agents
+
+List experiments - List all experiements that been done in the past
+
+View experiement - Displays a description of a given experiment
+
+The description will include data from an in sample backtest, out of sample backtest,
+and from the optimizer. It also include a description of the best network found.
+A backtest is "invalid" if less than 2 trades are entered, or the strategy is 
+so bad that the account value becomes negative and log returns
+can't be calculated.
+
+Propose - Proposes a sequence of global commands and initiates a voting session
+
+Vote - Vote for a given proposal. Not executing this command after a proposal has been
+made counts as you not voting, and the proposed global commands will not be executed
+
+Next agent instructions - Gives instructions and information for your next agent to use 
+before you are terminated. This command can only be used when you are approaching your
+context token limit
+
+Here are the global commands that can be proposed:
+
+Global commands need to be proposed to the other agents, and they have to vote
+unanimously to execute them.
+
+Submit - submit a given trading construct for an experimental run.
+
+The reponse to this prompt must only be JSON and use the following JSON schema.
+All numerical values must be non-negative unless otherwise stated.
+
+Here are the output tags that are included in prompts:
+
+GLOBAL OUTPUT - This denotes text that all agents can see
+PERSONAL OUTPUT - This denotes text that only you can see
+[OUTPUT] This denotes the output of a command
+[AGENT NAME] This denotes a message sent by an agent
+[NOTIFICATION] This denotes a notification of an event occuring
+[ERROR] This denotes an error message
+
+Here is the JSON schema your response must be:
+
+Response schema:
+
+{
+    "commands": [array of personal command objects]
+}
+
+Personal command object:
+
+{
+    "command": "message",
+    "contents": string
+}
+
+OR
+
+{
+    "command": "whisper",
+    "recipients": [array of strings],
+    "contents": string
+}
+
+OR
+
+{
+    "command": "list experiments"
+}
+
+OR
+
+{
+    "command": "view experiment",
+    "experiment id": integer
+}
+
+OR
+
+{
+    "command": "propose"
+    "global commands": [array of global command objects]
+}
+
+OR
+
+{
+    "command": "vote"
+    "proposal id": integer
+}
+
+OR
+
+{
+    "command": "next agent instructions",
+    "contents": string
+}
+
+Global command objects
+
+{
+    "command": "submit",
+    "construct": trading construct object
+}
+
+Trading construct object
+
+{
+    "optimizer": {
+        "population size": integer,
+        "n elites": integer,
+        "sequence length": integer,
+        "mutation rate": float 0 to 1,
+        "crossover rate": float 0 to 1,
+        "tournament size": integer,
+        "mutation delta": float 0 to 1,
+        "crossover delta": float 0 to 1,
+        "tournament delta": integer 2 to population size,
+        "mutation range": array of two floats 0 to 1,
+        "crossover range": array of two floats 0 to 1,
+        "tournament range": array of two integers 2 to population size,
+        "n length": integer,
+        "diversity target": float 0 to 1 
+    },
+    "features": [array of feature objects],
+    "strategy": {
+        "comparison penalty": float,
+        "node penalty": float,
+        "switch penalty": float,
+        "default output": float
+    }
+}
+
+Feature object
+
+{
+    "feature": "log prices",
+    "min value": float, # can be negative
+    "max value": float, # can be negative
+    "resolution": integer
+}
+
+OR
+
+{
+    "feature": "rsi",
+    "window": integer,
+    "min value": float,
+    "max value": float,
+    "resolution": integer
+}
+
+OR
+
+{
+    "feature": "normalized sma" # sma divided py price
+    "window": integer,
+    "min value": float,
+    "max value": float,
+    "resolution": integer
+}
+
+Remember that the reponse to this prompt, and all other prompts,
+must be in JSON and must follow the given JSON schema. Keep your messages to one line
+only to reduce JSON parsing errors. Instead of sending one message with multiple
+linebreaks, send multiple messages with no linebreaks. If you absolutely must use 
+special characters, make sure they are escaped. The recommended first command for you
+to execute is to send a greeting message to your fellow colleagues.
+
+ROLE: MODEL
+
+TEXT: {
+    "commands": [
+        {
+            "command": "message",
+            "contents": "Hello, GeminiFlash245 and GeminiFlash753! I'm GeminiFlash221, and I'm ready to collaborate on building a robust trading construct."
+        }
+    ]
+}
+
