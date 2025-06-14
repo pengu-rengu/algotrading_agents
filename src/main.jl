@@ -11,3 +11,5 @@ using .ActionsModule
 using .OptimizerModule
 using .ConstructModule
 using .AgentsModule
+
+go()

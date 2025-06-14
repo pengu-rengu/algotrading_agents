@@ -1,16 +1,24 @@
-
 module ActionsModule
 
+using ..FeaturesModule
 using ..StrategyModule
 
-export ActionParams, construct_network, all_actions
+export ActionsParams, construct_network, all_actions
 
-@kwdef struct ActionParams
+@kwdef struct ActionsParams
     meta_actions::Dict{String, Vector{String}}
+    allow_functions::Bool
+    allow_recurrence::Bool
+    action_probs::Union{nothing, Vector{Float64}}
 end
 
-function all_actions(action_params::ActionParams)
-    return ["MARK_FUNCTION", "NEXT_FUNCTION", "CALL_FUNCTION", "NEXT_INPUT", "NEXT_INPUT_UNIT", "NEXT_OUTPUT", "NEXT_OUTPUT_UNIT", "NEW_COMPARISON", "NEXT_COMPARISON", "NEW_NODE", "NEXT_NODE", "SELECT_NODE", "SET_IN_COMP", "SET_IN_NODE", "NEW_SWITCH", "SET_VALUE"; keys(action_params.meta_actions)]
+function all_actions(action_params::ActionsParams)
+    actions = vcat("NEXT_INPUT", "NEXT_INPUT_UNIT", "NEXT_OUTPUT", "NEXT_OUTPUT_UNIT", "NEW_COMPARISON", "NEXT_COMPARISON", "NEW_NODE", "NEXT_NODE", "SELECT_NODE", "SET_IN_COMP", "SET_IN_NODE", "NEW_SWITCH", "SET_VALUE", collect(keys(action_params.meta_actions)))
+    if action_params.allow_functions
+        append!(actions, ["MARK_FUNCTION", "NEXT_FUNCTION", "CALL_FUNCTION"])
+    end
+
+    return actions
 end
 
 @kwdef mutable struct ActionState
@@ -23,20 +31,22 @@ end
     selected_idx::Int = 1
     func_idx::Int = 1
     func_start_idx::Int = -1
-    functions::Vector{Vector{Action}} = []
-    action_history::Vector{Action} = []
+    functions::Vector{Vector{String}} = []
+    action_history::Vector{String} = []
     current_switches::Vector{Union{SwitchNode, Nothing}} = []
 end
 
-function do_action!(net::Network, action::String, state::ActionState, params::ActionParams)
-    push!(state.action_history, action)
+function do_action!(net::Network, action::String, state::ActionState, params::ActionsParams; append_history=true)
+    if append_history
+        push!(state.action_history, action)
+    end
     if state.func_start_idx > 0 && action != "MARK_FUNCTION"
         return
     end
 
     if haskey(params.meta_actions, action)
         for sub_action = params.meta_actions[action]
-            do_action!(net, sub_action, state, params)
+            do_action!(net, sub_action, state, params, append_history=false)
         end
         return
     end
@@ -58,7 +68,7 @@ function do_action!(net::Network, action::String, state::ActionState, params::Ac
             if func_action == "CALL_FUNCTION"
                 continue
             end
-            do_action!(net, func_action, state, params)
+            do_action!(net, func_action, state, params, append_history=false)
         end
     elseif action == "NEXT_INPUT"
         state.input_idx += 1
@@ -110,6 +120,9 @@ function do_action!(net::Network, action::String, state::ActionState, params::Ac
                 node.in2 = comparison
             end
         elseif action == "SET_IN_NODE"
+            if !params.allow_recurrence && state.selected_idx >= state.node_idx
+                return
+            end
             node = net.nodes[state.node_idx]
             selected_node = net.nodes[state.selected_idx]
             if isnothing(node.in1)
@@ -156,11 +169,12 @@ function do_action!(net::Network, action::String, state::ActionState, params::Ac
     end
 end
 
-function construct_network(; action_sequence::Vector{String}, action_params::ActionParams, network_params::NetworkParams, inputs::Vector{AbstractFeature}, outputs::Vector{AbstractFeature})::Network
-    net = Network(params=network_params, inputs=inputs, outputs=outputs)
+function construct_network(; action_sequence::Vector{String}, action_params::ActionsParams, inputs::Vector{AbstractFeature}, outputs::Vector{AbstractFeature})::Network
+    net = Network(inputs=inputs, outputs=outputs)
     init_roots!(net)
 
     state = ActionState()
+    state.current_switches = [nothing for _ = net.outputs]
 
     for action = action_sequence
         do_action!(net, action, state, action_params)

@@ -5,16 +5,13 @@ using ..FeaturesModule
 using ..StrategyModule
 using ..ActionsModule
 using ..OptimizerModule
-using Plots
 
-export TradingConstruct, ExperimentResults, run_experiment, from_json, describe_experiment_results
+export TradingConstruct, ExperimentResults, run_experiment, describe_experiment_results, construct_from_json, get_prices
 
 @kwdef struct TradingConstruct
-    
-    
     feature_params::FeatureParams
     strategy_params::StrategyParams
-    action_params::Action
+    actions_params::ActionsParams
     optimizer_params::GeneticParams
 end
 
@@ -57,7 +54,8 @@ function run_experiment(construct::TradingConstruct)::ExperimentResults
         time_limit=120.0,
         eval_func=criterion,
         params=construct.optimizer_params,
-        network_params=construct.strategy_params.network_params
+        action_params=construct.actions_params,
+        network_params=construct.strategy_params.network_penalties
     )
     init_optimizer!(opt)
     optimizer_results = optimize!(opt)
@@ -110,6 +108,7 @@ function construct_from_json(construct_json::Dict{String, Any})::TradingConstruc
         elseif feature_json["feature"] == "rsi"
             push!(features, RSI(
                 window=feature_json["window"],
+                smoothing=feature_json["smoothing"],
                 feature=get_continuous_feature(feature_json)
             ))
         elseif feature_json["feature"] == "normalized sma"
@@ -117,16 +116,39 @@ function construct_from_json(construct_json::Dict{String, Any})::TradingConstruc
                 window=feature_json["window"],
                 feature=get_continuous_feature(feature_json)
             ))
+        elseif feature_json["feature"] == "normalized ema"
+            push!(features, NormalizedEMA(
+                window=feature_json["window"],
+                feature=get_continuous_feature(feature_json)
+            ))
+        elseif feature_json["feature"] == "normalized bollinger bands"
+            push!(features, NormalizedBollingerBands(
+                window=feature_json["window"],
+                feature=get_continuous_feature(feature_json)
+            ))
+        else
+            throw(ErrorException("Unrecognized feature: " * feature_json["feature"]))
         end
     end
 
+    actions_json = construct_json["actions"]
+    meta_actions = Vector{Pair{String, Vector}}()
+    for meta_action_json = actions_json["meta actions"]
+        push!(meta_actions, meta_action_json["name"] => meta_action_json["sub actions"])
+    end
+
+    actions_params = ActionsParams(
+        meta_actions=Dict(meta_actions),
+        allow_functions=actions_json["allow functions"],
+        allow_recurrence=actions_json["allow recurrence"]
+    )
+
 
     strategy_json = construct_json["strategy"]
-    network_params = NetworkParams(
-        comparison_penalty=strategy_json["comparison penalty"],
-        node_penalty=strategy_json["node penalty"],
-        switch_penalty=strategy_json["node penalty"],
-        default_output=strategy_json["default output"]
+    network_penalties = NetworkPenalties(
+        comparison_modifier=strategy_json["comparison modifier"],
+        node_modifier=strategy_json["node modifier"],
+        switch_modifier=strategy_json["switch modifier"],
     )
 
     return TradingConstruct(
@@ -134,8 +156,9 @@ function construct_from_json(construct_json::Dict{String, Any})::TradingConstruc
         feature_params=FeatureParams(
             features=features
         ),
+        actions_params=actions_params,
         strategy_params=StrategyParams(
-            network_params=network_params
+            network_penalties=network_penalties
         )
     )
 end

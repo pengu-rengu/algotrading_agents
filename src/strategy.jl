@@ -1,32 +1,11 @@
 module StrategyModule
 
 using ..FeaturesModule
+using Statistics
 
 export StrategyParams, generate_signals
-export Network, NetworkParams, AbstractFeature, ContinuousFeature, SwitchNode,
-DiscreteFeature, evaluate!, init_roots!, reset_state!, switch_bfs, describe_network,
-get_penalty
-
-abstract type AbstractFeature end
-
-struct ContinuousFeature <: AbstractFeature
-    min_value::Float64
-    max_value::Float64
-    resolution::Int
-end
-
-units_to_value(cf::ContinuousFeature, units::Int)::Float64 = 
-cf.min_value + ((cf.max_value - cf.min_value) / cf.resolution) * units
-
-struct DiscreteFeature <: AbstractFeature
-    min_value::Float64
-    max_value::Float64
-    resolution::Int
-    DiscreteFeature(min_value::Float64, max_value::Float64) = new(min_value, max_value,
-    max_value - min_value)
-end
-
-units_to_value(df::DiscreteFeature, units::Int)::Float64 = df.min_value + units
+export backtest, BacktestResults
+export Network, NetworkPenalties, SwitchNode, ComparisonNode, LogicNode, evaluate!, init_roots!, reset_state!, switch_bfs, describe_network, get_penalty
 
 abstract type AbstractNode end
 
@@ -70,25 +49,16 @@ end
     value::Bool = false
 end
 
-@kwdef struct NetworkParams
-    comparison_penalty::Float64
-    node_penalty::Float64
-    switch_penalty::Float64
-    default_output::Float64
-end
-
 @kwdef mutable struct Network
-    params::NetworkParams
     inputs::Vector{AbstractFeature}
     outputs::Vector{AbstractFeature}
     comparisons::Vector{ComparisonNode} = []
     nodes::Vector{LogicNode} = []
-    roots::Vector{Union{SwitchNode, Nothing}} = [] 
+    roots::Vector{Union{SwitchNode, Nothing}} = []
 end
 
 function init_roots!(net::Network)
     net.roots = [nothing for _ = net.outputs]
-    net.state.current_switches = [nothing for _ = net.outputs]
 end
 
 function reset_state!(net::Network)
@@ -127,15 +97,13 @@ function evaluate!(net::Network, inputs::Vector{Float64})
             end
         end
         if isnothing(current)
-            current = net.params.default_output
+            current = 0.0
         end
         push!(outputs, current)
     end
 
     return outputs
 end
-
-
 
 function switch_bfs(net::Network)::Vector{Vector{SwitchNode}}
     switches::Vector{Vector{SwitchNode}} = []
@@ -168,10 +136,68 @@ function switch_bfs(net::Network)::Vector{Vector{SwitchNode}}
     return switches
 end
 
-function get_penalty(net::Network)::Float64
-    penalty = net.params.comparison_penalty * length(net.comparisons)
+@kwdef struct NetworkPenalties
+    comparison_penalty::Float64
+    node_penalty::Float64
+    switch_penalty::Float64
+    useless_comparison_penalty::Float64
+    useless_node_penalty::Float64
+    recurrence_penalty::Float64
+    non_recurrence_penalty::Float64
+    used_feature_penalty::Float64
+    unused_feature_penalty::Float64
+end
+
+function get_penalty(net::Network, penalties::NetworkPenalties)::Float64
+    penalty = penalties.comparison_penalty * length(net.comparisons)
     penalty += net.params.node_penalty * length(net.nodes)
     penalty += net.params.switch_penalty * length(vcat(switch_bfs(net)))
+
+    if penalties.useless_comparison_penalty > 0.0
+        unused_comparisons = copy(net.comparisons)
+        for node = net.nodes
+            idx = nothing
+            if isa(node.in1, ComparisonNode)
+                idx = findfirst(isequal(node.in1), unused_comparisons)
+            elseif isa(node.in2, ComparisonNode)
+                idx = findfirst(isequal(node.in2), unused_comparisons)
+            else
+                continue
+            end
+            
+            if !isnothing(idx)
+                deleteat!(unused_comparisons, idx)
+            end
+        end
+    end
+
+    if penalties.recurrence_penalty > 0.0 || penalties.non_recurrence_penalty > 0.0
+        for i = eachindex(net.nodes)
+            node = net.nodes[i]
+            idx1 = isnothing(node.in1) || isa(node.in1, ComparisonNode) ? nothing : findfirst(isequal(node.in1), net.nodes)
+            idx2 = isnothing(node.in2) || isa(node.in2, ComparisonNode) ? nothing :
+            findfirst(isequal(node.in2), net.nodes)
+
+            if (!isnothing(idx1) && idx1 >= i) || (!isnothing(idx2) && idx2 >= i)
+                penalty += penalties.recurrence_penalty
+            else
+                penalty += penalties.non_recurrence_penalty
+            end
+        end
+    end
+
+    if penalties.used_feature_penalty > 0.0 || penalties.used_feature_penalty > 0.0
+        unused_features = copy(net.inputs)
+        for comparison = net.comparisons
+            idx = findfirst(isequal(comparison.input_feature), unused_features)
+            if !isnothing(idx)
+                deleteat!(unused_features, idx)
+            end
+        end
+        penalty += penalties.unused_feature_penalty * length(unused_features)
+        penalty += penalties.used_feature_penalty * (length(net.inputs) - length(unused_features))
+    end
+    
     return penalty
 end
 
@@ -261,7 +287,7 @@ function describe_network(net::Network)::String
 end
 
 @kwdef struct StrategyParams
-    network_params::NetworkParams
+    network_penalties::NetworkPenalties
 end
 
 function generate_signals(net::Network, prices::Vector{Float64}, features::Vector{InputFeature})::Vector{Tuple{Bool, Bool}}
@@ -277,6 +303,80 @@ function generate_signals(net::Network, prices::Vector{Float64}, features::Vecto
     end
 
     return signals
+end
+
+
+@kwdef struct BacktestResults
+    sharpe_ratio::Float64
+    entries::Int
+    avg_holding_time::Float64
+    is_invalid::Bool
+end
+
+function backtest(signals::Vector{Tuple{Bool, Bool}}, prices::Vector{Float64}; detailed_results::Bool = false)::Union{Float64, BacktestResults}
+    
+    balance = 5000.0
+    enter_price = -1.0
+    values::Vector{Float64} = []
+    entries = 0
+    enter_index = -1
+    holding_times::Vector{Int} = []
+
+    for i = eachindex(prices)[3:end]
+        
+        if signals[i][1] && enter_price > 0
+            balance += prices[i] - enter_price
+            enter_price = -1
+            push!(holding_times, i - enter_index)
+        elseif signals[i][2] && enter_price < 0
+            enter_price = prices[i]
+            entries += 1
+            enter_index = i
+        end
+
+        if mod(i, 10) == 0
+            if enter_price > 0
+                push!(values, balance + (prices[i] - enter_price))
+            else
+                push!(values, balance)
+            end
+        end
+    end
+
+    if any(values .< 0.0) || entries < 2
+        if detailed_results
+            return BacktestResults(
+                sharpe_ratio=0.0,
+                entries=entries,
+                avg_holding_time=mean(holding_times),
+                is_invalid=true
+            )
+        end
+        return 0.0
+    end
+    
+    log_returns::Vector{Float64} = []
+    
+    for i = eachindex(values)[2:end]
+        push!(log_returns, log(values[i] / values[i - 1]))
+    end
+
+    if length(log_returns) < 2 || std(log_returns) == 0
+        return 0.0
+    end
+        
+    sharpe_ratio = mean(log_returns) / std(log_returns)
+
+    if detailed_results
+        return BacktestResults(
+            sharpe_ratio=sharpe_ratio,
+            entries=entries,
+            avg_holding_time=mean(holding_times),
+            is_invalid=false
+        )
+    end
+
+    return sharpe_ratio
 end
 
 end

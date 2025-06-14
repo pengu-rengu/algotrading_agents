@@ -2,12 +2,12 @@ module OptimizerModule
 
 using ..StrategyModule
 using ..ActionsModule
-using Statistics
+using ..FeaturesModule
 using Random
-using Plots
+using StatsBase
+using Statistics
 
-export GeneticOptimizer, GeneticParams, GeneticResults, init_optimizer!, optimize!, 
-plot_history, best_network, run_optimizer
+export GeneticOptimizer, GeneticParams, GeneticResults, init_optimizer!, optimize!, best_network
 
 @kwdef struct GeneticParams
     population_size::Int
@@ -25,6 +25,8 @@ plot_history, best_network, run_optimizer
     mutation_range::Tuple{Float64, Float64}
     crossover_range::Tuple{Float64, Float64}
     tournament_range::Tuple{Float64, Float64}
+    
+    operator_probs::Union{Nothing, Vector{Float64}}
 
     n_gram::Int
     diversity_target::Float64
@@ -34,8 +36,8 @@ end
     inputs::Vector{AbstractFeature}
     outputs::Vector{AbstractFeature}
     params::GeneticParams
-    network_params::NetworkParams
-    action_params::ActionParams
+    network_penalties::NetworkPenalties
+    action_params::ActionsParams
     time_limit::Float64
     eval_func::Function
 
@@ -64,9 +66,13 @@ function init_optimizer!(opt::GeneticOptimizer)
     opt.tournament_size = opt.params.tournament_size
     opt.population = []
     for _ = 1:opt.params.population_size
-        random_sequence::Vector{Action} = []
+        random_sequence::Vector{String} = []
         for __ = 1:opt.params.sequence_length
-            push!(random_sequence, rand(all_actions(opt.action_params)))
+            if isnothing(opt.action_params.action_probs)
+                push!(random_sequence, rand(all_actions(opt.action_params)))
+            else
+                push!(random_sequence, sample(all_actions(opt.action_params), Weights(opt.action_params.action_probs)))
+            end
         end
         push!(opt.population, random_sequence)
     end
@@ -79,17 +85,16 @@ function evaluate_scores!(opt::GeneticOptimizer)::Tuple{Float64, Float64}
         net = construct_network(
             action_sequence=sequence,
             action_params=opt.action_params,
-            network_params=opt.network_params,
             inputs=opt.inputs,
             outputs=opt.outputs
         )
-        push!(opt.scores, opt.eval_func(net) - get_penalty(net))
+        push!(opt.scores, opt.eval_func(net) + get_penalty(net, opt.network_penalties))
     end
 
-    return maximum(opt.scores), mean(opt.scores)
+    return maximum(opt.scores), Statistics.mean(opt.scores)
 end
 
-function select(opt::GeneticOptimizer)::Vector{Action}
+function select(opt::GeneticOptimizer)::Vector{String}
     tournament = shuffle(collect(1:opt.params.population_size))[1:opt.tournament_size]
     max_idx = tournament[1]
     max_score = opt.scores[tournament[1]]
@@ -102,7 +107,7 @@ function select(opt::GeneticOptimizer)::Vector{Action}
     return opt.population[max_idx]
 end
 
-function crossover(opt::GeneticOptimizer, parent1::Vector{Action}, parent2::Vector{Action})::Vector{Action}
+function crossover(opt::GeneticOptimizer, parent1::Vector{String}, parent2::Vector{String})::Vector{String}
     if rand() < opt.crossover_rate
         idx = rand(1:min(length(parent1), length(parent2)))
         child = [parent1[1:idx]; parent2[idx+1:end]]
@@ -111,23 +116,26 @@ function crossover(opt::GeneticOptimizer, parent1::Vector{Action}, parent2::Vect
     return copy(parent1)
 end
 
-function mutate(opt::GeneticOptimizer, sequence::Vector{Action})::Vector{Action}
+function mutate(opt::GeneticOptimizer, sequence::Vector{String})::Vector{String}
     
     mutated_sequence = copy(sequence)
     
     for _ = sequence
-        
         if rand() > opt.mutation_rate
             continue
         end
 
         idx = rand(1:length(mutated_sequence))
-        mutated_sequence[idx] = rand(all_actions(opt.action_params))
+        if isnothing(opt.action_params.action_probs)
+            mutated_sequence[idx] = rand(all_actions(opt.action_params))
+        else
+            mutated_sequence[idx] = sample(all_actions(opt.action_params), Weights(opt.action_params.action_probs))
+        end
     end
     return mutated_sequence
 end
 
-function calculate_diversity(opt::GeneticOptimizer, population::Vector{Vector{Action}})::Float64
+function calculate_diversity(opt::GeneticOptimizer, population::Vector{Vector{String}})::Float64
     unique_n_grams = Set{Tuple}()
 
     for sequence = population
@@ -141,7 +149,13 @@ function calculate_diversity(opt::GeneticOptimizer, population::Vector{Vector{Ac
 end
 
 function adjust!(opt::GeneticOptimizer, diversity::Float64)
-    operator = rand(["mutation", "crossover", "tournament"])
+    operator = ""
+    if isnothing(opt.params.operator_probs)
+        operator = rand(["mutation", "crossover", "tournament"])
+    else
+        operator = sample(["mutation", "crossover", "tournament"], Weights(opt.params.operator_probs))
+    end
+    
     direction = diversity < opt.params.diversity_target ? 1 : -1
 
     if operator == "mutation"
@@ -171,8 +185,8 @@ function adjust!(opt::GeneticOptimizer, diversity::Float64)
     end
 end
 
-function get_elites(opt::GeneticOptimizer)::Vector{Vector{Action}}
-    elites = Vector{Vector{Action}}()
+function get_elites(opt::GeneticOptimizer)::Vector{Vector{String}}
+    elites = Vector{Vector{String}}()
     indices = reverse(sortperm(opt.scores))
     for idx = indices
         sequence = opt.population[idx]
@@ -185,7 +199,7 @@ function get_elites(opt::GeneticOptimizer)::Vector{Vector{Action}}
     return elites
 end
 
-function get_new_population(opt::GeneticOptimizer)::Vector{Vector{Action}}
+function get_new_population(opt::GeneticOptimizer)::Vector{Vector{String}}
     new_population = get_elites(opt)
     while length(new_population) < opt.params.population_size
         parent1 = select(opt)
@@ -248,7 +262,6 @@ function best_network(opt::GeneticOptimizer)::Network
     net = construct_network(
         action_sequence=sequence,
         action_params=opt.action_params,
-        network_params=opt.network_params,
         inputs=opt.inputs,
         outputs=opt.outputs
     )
@@ -272,87 +285,6 @@ function save(opt::GeneticOptimizer, file_path::String)
     open(file_path, "w") do file
         write(file, text)
     end
-end
-
-
-function plot_history(opt::GeneticOptimizer)
-    p = plot([opt.best_score_history opt.mean_score_history])
-    display(p)
-    readline()
-end
-
-function plot_preds(opt::GeneticOptimizer)
-    idx = findmax(opt.scores)[2]
-    sequence = opt.population[idx]
-
-    net = Network(inputs=opt.inputs, outputs=opt.outputs, state=NetworkState())
-    init_roots!(net)
-    for action = sequence
-        do_action!(net, action)
-    end
-
-    x_values = collect(LinRange(0.0, 2pi, 10))
-    y_values = sin.(x_values)
-
-    preds = Vector{Float64}()
-
-    for i = eachindex(x_values)
-        x_norm = x_values[i] / (2pi)
-        push!(preds, evaluate!(net, [x_norm])[1])
-    end
-
-    p = plot(x_values, [y_values preds])
-    display(p)
-    readline()
-end
-
-
-function criterion(net::Network)::Float64
-    x_values = collect(LinRange(0.0, 2pi, 10))
-    y_values = sin.(x_values)
-    
-    error = 0.0
-
-    for i = eachindex(x_values)
-        x_norm = x_values[i] / (2pi)
-        pred = evaluate!(net, [x_norm])[1]
-        error += (pred - y_values[i]) ^ 2
-    end
-
-    return error / length(x_values)
-end
-
-function run_optimizer()
-
-    opt = GeneticOptimizer(
-        inputs=[ContinuousFeature(0.0, 1.0, 10)],
-        outputs=[ContinuousFeature(-1.0, 1.0, 10)],
-        params=GeneticParams(
-            population_size=1000,
-            n_generations=1000,
-            n_elites=5,
-            sequence_length=70,
-            mutation_rate=0.1,
-            crossover_rate=0.1,
-            tournament_size=10,
-            mutation_delta=0.01,
-            crossover_delta=0.01,
-            tournament_delta=1,
-            mutation_range=(0.01,0.5),
-            crossover_range=(0.01, 0.5),
-            tournament_range=(2, 100),
-            n_gram=5,
-            diversity_target=0.7,
-        ),
-        eval_func=criterion
-    )
-    println(opt.params)
-
-    optimize!(opt)
-    plot_history(opt)
-    plot_preds(opt)
-    #save(opt, joinpath(@__DIR__, "dataset.txt"))
-
 end
 
 end

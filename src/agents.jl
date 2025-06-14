@@ -20,13 +20,14 @@ model = "gemini-2.5-flash-preview-05-20"
     context_tokens::Int = 0
     context_notification_state::Int = 1
     next_agent_instructions::Union{String, Nothing} = nothing
+    error_chance::Float64 = -1.0
 end
 
 @kwdef mutable struct AgentWorkspace
     agents::Vector{Agent} = []
-    propsals::Vector = []
-    is_voting::Bool = false
-    check_votes::Bool = false
+    responses::Vector{String} = []
+    proposals::Vector = []
+    voting_state::Int = 1
     votes::Vector{Int} = []
     global_output::String = ""
     experiments::Vector{Dict} = []
@@ -43,13 +44,17 @@ function create_agent!(workspace::AgentWorkspace, context_limit::Int)
 end
 
 function get_instructions(agent::Agent, workspace::AgentWorkspace)::String
-    instructions = read("src/instructions.txt", String)
+    instructions = read("src/data/instructions.txt", String)
     instructions = replace(instructions, "AGENT_NAME" => agent.name)
 
     agent_names = [other_agent.name for other_agent = workspace.agents]
     deleteat!(agent_names, findfirst(isequal(agent.name), agent_names))
 
     instructions = replace(instructions, "OTHER_AGENTS" => join(agent_names, ", ", " and "))
+    instructions = replace(instructions, "FEATURES_SOURCE_CODE" => read("src/features.jl", String))
+    instructions = replace(instructions, "STRATEGY_SOURCE_CODE" => read("src/strategy.jl", String))
+    instructions = replace(instructions, "ACTIONS_SOURCE_CODE" => read("src/actions.jl", String))
+    instructions = replace(instructions, "OPTIMIZER_SOURCE_CODE" => read("src/optimizer.jl", String))
     return instructions
 end
 
@@ -98,14 +103,14 @@ end
 function run_global_commands!(workspace::AgentWorkspace)
 
     global_commands::Union{Vector, Nothing} = nothing
-    for i = eachindex(workspace.propsals)
-        if workspace.votes[i] == length(workspace.agents)
-            global_commands = workspace.propsals[i]
+    for i = eachindex(workspace.proposals)
+        if workspace.votes[i] == length(workspace.agents) || (workspace.votes[i] >= length(workspace.agents) - 1 && length(workspace.proposals[i]) == 1 && workspace.proposals[i][1]["command"] == "restart")
+            global_commands = workspace.proposals[i]
         end
     end
 
-    workspace.is_voting = false
-    workspace.propsals = []
+    workspace.voting_state = 1
+    workspace.proposals = []
     workspace.votes = []
     for agent = workspace.agents
         agent.has_voted = false
@@ -118,7 +123,7 @@ function run_global_commands!(workspace::AgentWorkspace)
 
     for command = global_commands
         if command["command"] == "submit"
-            results = run_experiment(from_json(command["construct"]))
+            results = run_experiment(construct_from_json(command["construct"]))
             experiment_dict = Dict([
                 "id" => length(workspace.experiments) + 1,
                 "construct" => command["construct"],
@@ -126,6 +131,23 @@ function run_global_commands!(workspace::AgentWorkspace)
             ])
             push!(workspace.experiments, experiment_dict)
             workspace.global_output *= string("[NOTIFICATION] The experiment has finished running! Use the view experiment command with an id parameter of ", length(workspace.experiments), " to display the results.") 
+        elseif command["command"] == "message admin"
+            open("src/data/admin_inbox.txt", "a") do file
+                write(file, "\n" * command["contents"] * "\n")
+            end
+            workspace.global_output *= "[OUTPUT] message sent to human administrator\n"
+        elseif command["command"] == "restart"
+            idx = findfirst(agent -> agent.name == command["agent name"], workspace.agents)
+            workspace.agents[idx].context = []
+            workspace.agents[idx].context_tokens = 0
+            workspace.agents[idx].context_notification_state = 1
+            workspace.agents[idx].descendant_number += 1
+            workspace.agents[idx].error_chance = -1.0
+            instructions = get_instructions(workspace.agents[idx], workspace)
+            instructions *= "\nA previous " * workspace.agents[idx].name * " agent has been active, but they were behaving problematically. Before they were terminated, they left instructions for you, the next " * workspace.agents[idx].name * " generation. Here are the instructions:\n"
+            instructions *= command["instructions"]
+            workspace.responses[idx] = run_prompt!(workspace.agents[idx], instructions)
+            sleep(65)
         end
     end
 end
@@ -152,8 +174,7 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
                 continue
             end
             for experiment = workspace.experiments
-                agent.personal_output *= "id: " * experiment["id"]
-                agent.personal_output *= ", out of sample sharpe ratio: " * string(experiment["results"].oos_backtest_results.sharpe_ratio)
+                agent.personal_output *= string("id: ", experiment["id"], ", out of sample sharpe ratio: ", experiment["results"].oos_backtest_results.sharpe_ratio)
                 agent.personal_output *= "\n"
             end
         elseif command["command"] == "view experiment"
@@ -167,24 +188,24 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
             agent.personal_output *= string(workspace.experiments[idx]["construct"]) * "\n"
             agent.personal_output *= describe_experiment_results(workspace.experiments[idx]["results"]) * "\n"
         elseif command["command"] == "propose"
-            if workspace.is_voting
-                agent.personal_output *= "[ERROR] cannot propose duing a voting session\n"
+            if workspace.voting_state == 3
+                agent.personal_output *= "[ERROR] cannot propose during a voting session\n"
                 continue
             end
             
-            if !workspace.is_voting
-                workspace.is_voting = true
+            if workspace.voting_state == 1
+                workspace.voting_state = 2
                 workspace.global_output *= "[OUTPUT] A proposal has made been, and a voting session has been initiated! Use the vote command to vote for a proposal.\n"
             end
 
             workspace.global_output *= "[OUTPUT] " * agent.name * " has proposed a global command sequence!\n"
-            workspace.global_output *= string("Propsal id: ", length(workspace.propsals) + 1, "\n") 
+            workspace.global_output *= string("Proposal id: ", length(workspace.proposals) + 1, "\n") 
             workspace.global_output *= JSON.json(command["global commands"]) * "\n"
-            push!(workspace.propsals, command["global commands"])
+            push!(workspace.proposals, command["global commands"])
             push!(workspace.votes, 0)
             
         elseif command["command"] == "vote"
-            if !workspace.is_voting
+            if workspace.voting_state != 3
                 agent.personal_output *= "[ERROR] voting is only allowed directly after a proposal has been made\n"
                 continue
             end
@@ -194,7 +215,7 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
                 continue
             end
 
-            if command["proposal id"] > length(workspace.propsals)
+            if command["proposal id"] > length(workspace.proposals)
                 agent.personal_output *= string("[ERROR] could not find proposal with id ", command["proposal id"], "\n")
                 continue
             end
@@ -213,8 +234,8 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
     end
 end
 
-function prompt_agents!(workspace::AgentWorkspace)::Vector{String}
-    responses::Vector{String} = []
+function prompt_agents!(workspace::AgentWorkspace)
+    workspace.responses = []
     for agent = workspace.agents
         prompt = "GLOBAL OUTPUT\n\n"
         prompt *= workspace.global_output * "\n"
@@ -222,14 +243,13 @@ function prompt_agents!(workspace::AgentWorkspace)::Vector{String}
         prompt *= agent.personal_output * "\n"
         agent.personal_output = ""
 
-        push!(responses, run_prompt!(agent, prompt))
-        sleep(6.5)
+        push!(workspace.responses, run_prompt!(agent, prompt))
+        sleep(65)
     end
     workspace.global_output = ""
-    return responses
 end
 
-function check_context!(workspace::AgentWorkspace, responses::Vector{String})
+function check_context!(workspace::AgentWorkspace)
     for agent = workspace.agents
         if agent.context_tokens > agent.context_limit
             workspace.global_output *= "[NOTIFICATION] " * agent.name * " has reached their context limit and has been terminated. A new " * agent.name * " agent will be instantiated.\n"
@@ -245,7 +265,8 @@ function check_context!(workspace::AgentWorkspace, responses::Vector{String})
                 instructions *= agent.next_agent_instructions
                 agent.next_agent_instructions = nothing
             end
-            responses[idx] = run_prompt!(agent, instructions)
+            workspace.responses[idx] = run_prompt!(agent, instructions)
+            sleep(65)
         elseif agent.context_tokens > 0.8 * agent.context_limit && agent.context_notification_state == 3
             workspace.global_output *= string("[NOTIFICATION] ", agent.name, " has reached 80% of their context window\n")
             agent.personal_output *= "[NOTIFICATION] You are approaching your context token limit, so you will no longer be able to participate soon. Before you are terminated, a new " * agent.name * " agent will instantiated, but they will have no prior knowledge besides the initial instructions. As a result, you must write additional instructions for the new agent to reference. This should contain a detailed account of your thought proccesses, what have been doing, and your role in the team. The more detailed you are, the less the new model will have to repeat the thinking you already did. Use the next agent instructions command.\n"
@@ -258,8 +279,6 @@ function check_context!(workspace::AgentWorkspace, responses::Vector{String})
             agent.context_notification_state = 2
         end
     end
-
-    return responses
 end
 
 function log_agents(workspace::AgentWorkspace)
@@ -278,51 +297,57 @@ function log_agents(workspace::AgentWorkspace)
 end
 
 function run_agents!(workspace::AgentWorkspace)
-    responses::Vector{String} = []
+    workspace.responses = []
     for agent = workspace.agents
-        push!(responses, run_prompt!(agent, get_instructions(agent, workspace)))
+        push!(workspace.responses, run_prompt!(agent, get_instructions(agent, workspace)))
     end
 
     while true
         for i = eachindex(workspace.agents)
             commands = Dict{String, Any}()
             try
-                commands = JSON.parse(responses[i])
+                commands = JSON.parse(workspace.responses[i])
             catch e
-                workspace.agents[i].personal_output *= string("[ERROR] an error occured while parsing commands JSON: ", e, ". please ensure that responses follow the JSON schema and don't have any extraneous text or unescaped special charaters\n")
+                workspace.agents[i].personal_output *= string("[ERROR] an error occured while parsing commands JSON: ", e, ". please ensure that responses follow the JSON schema and don't have any extraneous text, linebreaks, or any other unescaped special charaters\n")
             end
 
             try
+                if workspace.agents[i].error_chance > 0 && rand() < workspace.agents[i].error_chance
+                    throw(ErrorException("An unknown error ocurred (this is for testing purposes)"))
+                end
                 run_commands!(commands, workspace.agents[i], workspace)
             catch e
                 workspace.agents[i].personal_output *= string("[ERROR] an error occured while running commands: ", e, "\n")
             end
+
+            if workspace.agents[i].error_chance > 0
+                workspace.agents[i].error_chance += 0.03
+            end
         end
         
-        if workspace.check_votes
-            workspace.check_votes = false
-            workspace.is_voting = false
+        if workspace.voting_state == 3
+            workspace.voting_state = 1
             try
                 run_global_commands!(workspace)
             catch e
                 workspace.global_output *= string("[ERROR] an error occured while running global commands: ", e, "\n")
             end
-        elseif workspace.is_voting
-            workspace.check_votes = true
+        elseif workspace.voting_state == 2
+            workspace.voting_state = 3
         end
 
         while true
             try
-                responses = prompt_agents!(workspace)
+                prompt_agents!(workspace)
                 break
             catch e
                 println(e)
                 println("An error occured while prompting agents; trying again in 5 minutes")
-                sleep(60)
+                sleep(300)
             end
         end
         
-        check_context!(workspace, responses)
+        check_context!(workspace)
 
         log_agents(workspace)
     end
@@ -331,9 +356,20 @@ end
 function go()
 
     workspace = AgentWorkspace()
+    construct_json = JSON.parse(read("src/data/initial_experiment.json", String))
+    results = run_experiment(construct_from_json(construct_json))
+    experiment_dict = Dict([
+        "id" => length(workspace.experiments) + 1,
+        "construct" => construct_json,
+        "results" => results
+    ])
+    push!(workspace.experiments, experiment_dict)
+
     create_agent!(workspace, 100000)
     create_agent!(workspace, 150000)
     create_agent!(workspace, 200000)
+    workspace.agents[1].error_chance = 0.1
+
 
     run_agents!(workspace)
 end
