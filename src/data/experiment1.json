@@ -1,0 +1,64 @@
+{
+    "optimizer": {
+        "population size": 250,
+        "n elites": 5,
+        "sequence length": 50,
+        "mutation rate": 0.1,
+        "crossover rate": 0.1,
+        "tournament size": 10,
+        "mutation delta": 0.01,
+        "crossover delta": 0.01,
+        "tournament delta": 1,
+        "mutation range": [
+            0.01,
+            0.5
+        ],
+        "crossover range": [
+            0.01,
+            0.5
+        ],
+        "tournament range": [
+            3,
+            100
+        ],
+        "n length": 10,
+        "diversity target": 0.7,
+        "operator probs": "uniform"
+    },
+    "features": [
+        {
+            "feature": "log prices",
+            "min value": -0.1,
+            "max value": 0.1,
+            "resolution": 8
+        }
+    ],
+    "actions": {
+        "meta actions": [],
+        "scaffolding": [],
+        "allow functions": true,
+        "allow recurrence": true,
+        "action probs": "uniform"
+    },
+    "strategy": {
+        "stop loss": null,
+        "take profit": null,
+        "max holding time": null,
+        "penalties": {
+            "comparison penalty": 0.0,
+            "node penalty": 0.002,
+            "switch penalty": 0.002,
+            "useless comparison penalty": 0.0,
+            "useless node penalty": 0.0,
+            "recurrence penalty": 0.0,
+            "non recurrence penalty": 0.0,
+            "used feature penalty": 0.0,
+            "unused feature penalty": 0.0
+        },
+        "scaffolding": {
+            "comparisons": [],
+            "nodes": [],
+            "switches": null
+        }
+    }
+}

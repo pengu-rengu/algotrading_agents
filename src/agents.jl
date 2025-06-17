@@ -18,9 +18,8 @@ model = "gemini-2.5-flash-preview-05-20"
     personal_output::String = ""
     has_voted::Bool = false
     context_tokens::Int = 0
-    context_notification_state::Int = 1
+    context_notified::Bool = false
     next_agent_instructions::Union{String, Nothing} = nothing
-    error_chance::Float64 = -1.0
 end
 
 @kwdef mutable struct AgentWorkspace
@@ -140,19 +139,24 @@ function run_global_commands!(workspace::AgentWorkspace)
             idx = findfirst(agent -> agent.name == command["agent name"], workspace.agents)
             workspace.agents[idx].context = []
             workspace.agents[idx].context_tokens = 0
-            workspace.agents[idx].context_notification_state = 1
+            workspace.agents[idx].context_notified = false
             workspace.agents[idx].descendant_number += 1
-            workspace.agents[idx].error_chance = -1.0
             instructions = get_instructions(workspace.agents[idx], workspace)
             instructions *= "\nA previous " * workspace.agents[idx].name * " agent has been active, but they were behaving problematically. Before they were terminated, they left instructions for you, the next " * workspace.agents[idx].name * " generation. Here are the instructions:\n"
             instructions *= command["instructions"]
             workspace.responses[idx] = run_prompt!(workspace.agents[idx], instructions)
             sleep(65)
+            workspace.global_output *= "[NOTIFICATION] " * workspace.agents[idx].name * " has been restarted\n"
+        else
+            workspace.global_output *= string("[ERROR] Unrecognized global command: ", command["command"], ". Maybe it's a personal command?\n")
         end
     end
 end
 
 function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::AgentWorkspace)
+    if length(commands["commands"]) == 0
+        agent.personal_output *= "[ERROR] An empty command sequence is unacceptable! There is always something to be doing, whether it be discussing with your team, proposing or voting for global commands, or viewing past experiments.\n"
+    end
     for command = commands["commands"]
         if command["command"] == "message"
             workspace.global_output *= string("[", agent.name, "] ", command["contents"], "\n\n")
@@ -185,7 +189,7 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
             end
             agent.personal_output *= "[OUTPUT]\n"
             agent.personal_output *= "Construct JSON:\n"
-            agent.personal_output *= string(workspace.experiments[idx]["construct"]) * "\n"
+            agent.personal_output *= JSON.json(workspace.experiments[idx]["construct"]) * "\n"
             agent.personal_output *= describe_experiment_results(workspace.experiments[idx]["results"]) * "\n"
         elseif command["command"] == "propose"
             if workspace.voting_state == 3
@@ -205,6 +209,7 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
             push!(workspace.votes, 0)
             
         elseif command["command"] == "vote"
+            
             if workspace.voting_state != 3
                 agent.personal_output *= "[ERROR] voting is only allowed directly after a proposal has been made\n"
                 continue
@@ -228,8 +233,16 @@ function run_commands!(commands::Dict{String, Any}, agent::Agent, workspace::Age
                 agent.personal_output *= "[ERROR] Next agent instructions can only be given when you have used more than 80% of your context limit.\n"
                 continue
             end
+            if !isnothing(agent.next_agent_instructions)
+                agent.personal_output *= "[ERROR] You have already given next agent instructions.\n"
+                continue
+            end
             agent.next_agent_instructions = command["contents"]
             agent.personal_output *= "[OUTPUT] Instructions for next agent have been saved\n"
+        elseif command["command"] == "context used"
+            agent.personal_output *= string("[OUTPUT] Context used: ", round((agent.context_tokens / agent.context_limit) * 100, digits=2), "% (", agent.context_tokens, "/", agent.context_limit, " tokens)\n")
+        else
+            agent.personal_output *= string("[ERROR] Unrecognized personal command: ",  command["command"], ". Maybe it's a global command?\n")
         end
     end
 end
@@ -256,27 +269,20 @@ function check_context!(workspace::AgentWorkspace)
             idx = findfirst(isequal(agent), workspace.agents)
             workspace.agents[idx].context = []
             workspace.agents[idx].context_tokens = 0
-            workspace.agents[idx].context_notification_state = 1
+            workspace.agents[idx].context_notified = false
             workspace.agents[idx].descendant_number += 1
             instructions = get_instructions(agent, workspace)
             if !isnothing(agent.next_agent_instructions)
-                instructions *= "\nA previous " * agent.name * " agent has been active, but they have reached their context limit. Before they were terminated, they left instructions for you, the next " * agent.name * " generation.
-                Here are the instructions:\n"
+                instructions *= "\nA previous " * agent.name * " agent has been active, but they have reached their context limit. Before they were terminated, they left instructions for you, the next " * agent.name * " generation.Here are the instructions:\n"
                 instructions *= agent.next_agent_instructions
                 agent.next_agent_instructions = nothing
             end
             workspace.responses[idx] = run_prompt!(agent, instructions)
             sleep(65)
-        elseif agent.context_tokens > 0.8 * agent.context_limit && agent.context_notification_state == 3
+        elseif agent.context_tokens > 0.8 * agent.context_limit && !agent.context_notified
             workspace.global_output *= string("[NOTIFICATION] ", agent.name, " has reached 80% of their context window\n")
-            agent.personal_output *= "[NOTIFICATION] You are approaching your context token limit, so you will no longer be able to participate soon. Before you are terminated, a new " * agent.name * " agent will instantiated, but they will have no prior knowledge besides the initial instructions. As a result, you must write additional instructions for the new agent to reference. This should contain a detailed account of your thought proccesses, what have been doing, and your role in the team. The more detailed you are, the less the new model will have to repeat the thinking you already did. Use the next agent instructions command.\n"
-            agent.context_notification_state = 4
-        elseif agent.context_tokens > 0.5 * agent.context_limit && agent.context_notification_state == 2
-            workspace.global_output *= string("[NOTIFICATION] ", agent.name, " has reached 50% of their context window\n")
-            agent.context_notification_state = 3
-        elseif agent.context_tokens > 0.25 * agent.context_limit && agent.context_notification_state == 1
-            workspace.global_output *= string("[NOTIFICATION] ", agent.name, " has reached 25% of their context window\n")
-            agent.context_notification_state = 2
+            agent.personal_output *= "[NOTIFICATION] You are approaching your context token. Before you are terminated, a new " * agent.name * " agent will instantiated, but they will have no prior knowledge besides the initial instructions. As a result, you must write additional instructions for the new agent to reference. This should contain a detailed account of your thought proccesses, what have been doing, and your role in the team. The more detailed you are, the less the new model will have to repeat the thinking you already did. Also remember that although you are approaching your context limit, you should continue to participate instead of waiting and doing nothing. Use the next agent instructions command.\n"
+            agent.context_notified = true
         end
     end
 end
@@ -312,16 +318,12 @@ function run_agents!(workspace::AgentWorkspace)
             end
 
             try
-                if workspace.agents[i].error_chance > 0 && rand() < workspace.agents[i].error_chance
-                    throw(ErrorException("An unknown error ocurred (this is for testing purposes)"))
-                end
                 run_commands!(commands, workspace.agents[i], workspace)
             catch e
                 workspace.agents[i].personal_output *= string("[ERROR] an error occured while running commands: ", e, "\n")
-            end
-
-            if workspace.agents[i].error_chance > 0
-                workspace.agents[i].error_chance += 0.03
+                if isa(e, KeyError)
+                    workspace.agents[i].personal_output *= "[ERROR] A KeyError has occured. please ensure that your commands have all the required parameters."
+                end
             end
         end
         
@@ -331,6 +333,10 @@ function run_agents!(workspace::AgentWorkspace)
                 run_global_commands!(workspace)
             catch e
                 workspace.global_output *= string("[ERROR] an error occured while running global commands: ", e, "\n")
+                if isa(e, KeyError)
+                    workspace.global_output *= "[ERROR] A KeyError has occured. please
+                    ensure that the global commands have all the required parameters."
+                end
             end
         elseif workspace.voting_state == 2
             workspace.voting_state = 3
@@ -339,11 +345,12 @@ function run_agents!(workspace::AgentWorkspace)
         while true
             try
                 prompt_agents!(workspace)
+                println("successfully prompted agents")
                 break
             catch e
                 println(e)
-                println("An error occured while prompting agents; trying again in 5 minutes")
-                sleep(300)
+                println("An error occured while prompting agents; trying again in 1 hour")
+                sleep(3600)
             end
         end
         
@@ -356,22 +363,33 @@ end
 function go()
 
     workspace = AgentWorkspace()
-    construct_json = JSON.parse(read("src/data/initial_experiment.json", String))
-    results = run_experiment(construct_from_json(construct_json))
-    experiment_dict = Dict([
-        "id" => length(workspace.experiments) + 1,
-        "construct" => construct_json,
-        "results" => results
-    ])
-    push!(workspace.experiments, experiment_dict)
 
+    construct1_json = JSON.parse(read("src/data/experiment1.json", String))
+    results1 = run_experiment(construct_from_json(construct1_json))
+    println(describe_experiment_results(results1))
+    experiment1_dict = Dict([
+        "id" => length(workspace.experiments) + 1,
+        "construct" => construct1_json,
+        "results" => results1
+    ])
+    push!(workspace.experiments, experiment1_dict)
+
+    """
+    construct2_json = JSON.parse(read("src/data/experiment2.json", String))
+    results2 = run_experiment(construct_from_json(construct2_json))
+    println(describe_experiment_results(results2))
+    experiment2_dict = Dict([
+        "id" => length(workspace.experiments) + 1,
+        "construct" => construct2_json,
+        "results" => results2
+    ])
+    push!(workspace.experiments, experiment2_dict)
+    """
     create_agent!(workspace, 100000)
     create_agent!(workspace, 150000)
     create_agent!(workspace, 200000)
-    workspace.agents[1].error_chance = 0.1
 
-
-    run_agents!(workspace)
+    #run_agents!(workspace)
 end
 
 

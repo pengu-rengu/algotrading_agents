@@ -1,0 +1,68 @@
+{
+    "optimizer": {
+        "population size": 100,
+        "n elites": 50,
+        "sequence length": 25,
+        "mutation rate": 0.1,
+        "crossover rate": 0.1,
+        "tournament size": 10,
+        "mutation delta": 0.01,
+        "crossover delta": 0.01,
+        "tournament delta": 1,
+        "mutation range": [
+            0.01,
+            0.5
+        ],
+        "crossover range": [
+            0.01,
+            0.5
+        ],
+        "tournament range": [
+            3,
+            100
+        ],
+        "n length": 10,
+        "diversity target": 0.5,
+        "operator probs": [0.9, 0.05, 0.05]
+    },
+    "features": [
+        {
+            "feature": "log prices",
+            "min value": -0.2,
+            "max value": 0.2,
+            "resolution": 25
+        }
+    ],
+    "actions": {
+        "meta actions": [
+            {
+                "name": "NEXT_NODE_3",
+                "sub actions": ["NEXT_NODE", "NEXT_NODE", "NEXT_NODE"]
+            },
+            {
+                "name": "NEXT_INPUT_UNIT_3",
+                "sub actions": ["NEXT_INPUT_UNIT", "NEXT_INPUT_UNIT", "NEXT_INPUT_UNIT"]
+            }
+        ],
+        "scaffolding": [],
+        "allow functions": true,
+        "allow recurrence": true,
+        "action probs": [0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.68]
+    },
+    "strategy": {
+        "stop loss": 0.1,
+        "take profit": 0.1,
+        "max holding time": 25,
+        "penalties": {
+            "comparison penalty": 0.01,
+            "node penalty": 0.01,
+            "switch penalty": 0.01,
+            "useless comparison penalty": 0.01,
+            "useless node penalty": 0.01,
+            "recurrence penalty": 0.0,
+            "non recurrence penalty": 0.01,
+            "used feature penalty": 0.0,
+            "unused feature penalty": 0.01
+        }
+    }
+}

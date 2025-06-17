@@ -7,15 +7,16 @@ export ActionsParams, construct_network, all_actions
 
 @kwdef struct ActionsParams
     meta_actions::Dict{String, Vector{String}}
+    scaffolding::Vector{String}
     allow_functions::Bool
     allow_recurrence::Bool
-    action_probs::Union{nothing, Vector{Float64}}
+    action_probs::Union{Nothing, Vector{Float64}}
 end
 
 function all_actions(action_params::ActionsParams)
-    actions = vcat("NEXT_INPUT", "NEXT_INPUT_UNIT", "NEXT_OUTPUT", "NEXT_OUTPUT_UNIT", "NEW_COMPARISON", "NEXT_COMPARISON", "NEW_NODE", "NEXT_NODE", "SELECT_NODE", "SET_IN_COMP", "SET_IN_NODE", "NEW_SWITCH", "SET_VALUE", collect(keys(action_params.meta_actions)))
+    actions = vcat("NEXT_FEATURE", "NEXT_FEATURE_BIN", "NEW_COMPARISON", "NEXT_COMPARISON", "NEW_NODE", "NEXT_NODE", "SELECT_NODE", "SET_IN_COMP", "SET_IN_NODE", "NEW_SWITCH", "SET_VALUE_TRUE", "SET_VALUE_FALSE", collect(keys(action_params.meta_actions)))
     if action_params.allow_functions
-        append!(actions, ["MARK_FUNCTION", "NEXT_FUNCTION", "CALL_FUNCTION"])
+        prepend!(actions, ["MARK_FUNCTION", "NEXT_FUNCTION", "CALL_FUNCTION"])
     end
 
     return actions
@@ -24,8 +25,6 @@ end
 @kwdef mutable struct ActionState
     input_idx::Int = 1
     input_units::Int = 0
-    output_idx::Int = 1
-    output_units::Int = 0
     comp_idx::Int = 1
     node_idx::Int = 1
     selected_idx::Int = 1
@@ -33,7 +32,7 @@ end
     func_start_idx::Int = -1
     functions::Vector{Vector{String}} = []
     action_history::Vector{String} = []
-    current_switches::Vector{Union{SwitchNode, Nothing}} = []
+    current_switch::Union{SwitchNode, Nothing} = nothing
 end
 
 function do_action!(net::Network, action::String, state::ActionState, params::ActionsParams; append_history=true)
@@ -70,28 +69,18 @@ function do_action!(net::Network, action::String, state::ActionState, params::Ac
             end
             do_action!(net, func_action, state, params, append_history=false)
         end
-    elseif action == "NEXT_INPUT"
+    elseif action == "NEXT_FEATURE"
         state.input_idx += 1
-        if state.input_idx > length(net.inputs)
+        if state.input_idx > length(net.features)
             state.input_idx = 1
         end
-    elseif action == "NEXT_INPUT_UNIT"
+    elseif action == "NEXT_FEATURE_BIN"
         state.input_units += 1
-        if state.input_units > net.inputs[state.input_idx].resolution
+        if state.input_units > net.features[state.input_idx].resolution
             state.input_units = 0
         end
-    elseif action == "NEXT_OUTPUT"
-        state.output_idx += 1
-        if state.output_idx > length(net.outputs)
-            state.output_idx = 1
-        end
-    elseif action == "NEXT_OUTPUT_UNIT"
-        state.output_units += 1
-        if state.output_units > net.outputs[state.output_idx].resolution
-            state.output_units = 0
-        end
     elseif action == "NEW_COMPARISON"
-        push!(net.comparisons, ComparisonNode(net.inputs[state.input_idx], 
+        push!(net.comparisons, ComparisonNode(net.features[state.input_idx], 
         state.input_idx, state.input_units))
     elseif action == "NEXT_COMPARISON"
         state.comp_idx += 1
@@ -132,49 +121,56 @@ function do_action!(net::Network, action::String, state::ActionState, params::Ac
             end
         elseif action == "NEW_SWITCH"
             new_switch = SwitchNode(input_node=net.nodes[state.node_idx])
-            current_switch = state.current_switches[state.output_idx]
-            if isnothing(current_switch)
-                current_switch = new_switch
-                net.roots[state.output_idx] = current_switch
-                state.current_switches[state.output_idx] = current_switch
+            if isnothing(state.current_switch)
+                state.current_switch = new_switch
+                net.output_root = new_switch
             else
-                if isnothing(current_switch.left)
-                    new_switch.parent_switch = current_switch
-                    current_switch.left = new_switch
-                    current_switch = current_switch.left
-                    state.current_switches[state.output_idx] = current_switch
+                if isnothing(state.current_switch.left)
+                    new_switch.parent_switch = state.current_switch
+                    state.current_switch.left = new_switch
+                    state.current_switch = state.current_switch.left
                 else
-                    while !isnothing(current_switch.right) && !isnothing(current_switch.parent_switch)
-                        current_switch = current_switch.parent_switch
+                    while !isnothing(state.current_switch.right) && !isnothing(state.current_switch.parent_switch)
+                        state.current_switch = state.current_switch.parent_switch
                     end
 
-                    if isnothing(current_switch.right)
-                        new_switch.parent_switch = current_switch
-                        current_switch.right = new_switch
-                        current_switch = current_switch.right
-                        state.current_switches[state.output_idx] = current_switch
+                    if isnothing(state.current_switch.right)
+                        new_switch.parent_switch = state.current_switch
+                        state.current_switch.right = new_switch
+                        state.current_switch = state.current_switch.right
                     end
                 end
             end
-        elseif action == "SET_VALUE"
-            current_switch = state.current_switches[state.output_idx]
-            if !isnothing(current_switch)
-                if isnothing(current_switch.left)
-                    current_switch.left = units_to_value(net.outputs[state.output_idx], state.output_units)
-                elseif isnothing(current_switch.right)
-                    current_switch.right = units_to_value(net.outputs[state.output_idx], state.output_units)
+        elseif action == "SET_VALUE_FALSE"
+            if !isnothing(state.current_switch)
+                if isnothing(state.current_switch.left)
+                    state.current_switch.left = false
+                elseif isnothing(state.current_switch.right)
+                    state.current_switch.right = false
+                end
+            end
+        elseif action == "SET_VALUE_TRUE"
+            if !isnothing(state.current_switch)
+                if isnothing(state.current_switch.left)
+                    state.current_switch.left = true
+                elseif isnothing(state.current_switch.right)
+                    state.current_switch.right = true
                 end
             end
         end
     end
 end
 
-function construct_network(; action_sequence::Vector{String}, action_params::ActionsParams, inputs::Vector{AbstractFeature}, outputs::Vector{AbstractFeature})::Network
-    net = Network(inputs=inputs, outputs=outputs)
-    init_roots!(net)
+function construct_network(;action_sequence::Vector{String}, action_params::ActionsParams, features::Vector{AbstractFeature})::Network
+    net = Network(
+        features=features,
+    )
 
     state = ActionState()
-    state.current_switches = [nothing for _ = net.outputs]
+    
+    for action = action_params.scaffolding
+        do_action!(net, action, state, action_params)
+    end
 
     for action = action_sequence
         do_action!(net, action, state, action_params)

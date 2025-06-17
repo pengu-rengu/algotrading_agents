@@ -103,6 +103,7 @@ end
     band::String
     window::Int
     std_multiplier::Float64
+    feature::ContinuousFeature
 end
 
 function get_values(bb::NormalizedBollingerBands, prices::Vector{Float64})::Vector{Float64}

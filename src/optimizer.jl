@@ -33,10 +33,9 @@ export GeneticOptimizer, GeneticParams, GeneticResults, init_optimizer!, optimiz
 end
 
 @kwdef mutable struct GeneticOptimizer
-    inputs::Vector{AbstractFeature}
-    outputs::Vector{AbstractFeature}
+    
+    features::Vector{AbstractFeature}
     params::GeneticParams
-    network_penalties::NetworkPenalties
     action_params::ActionsParams
     time_limit::Float64
     eval_func::Function
@@ -44,6 +43,8 @@ end
     mutation_rate::Float64 = 0.0
     crossover_rate::Float64 = 0.0
     tournament_size::Int = 0
+
+    rng::AbstractRNG = Random.default_rng()
 
     population::Vector{Vector{String}} = []
     scores::Vector{Float64} = []
@@ -58,6 +59,7 @@ end
     generations::Int
     inflection_points::Vector{Tuple{Int, Float64}}
     best_network::Network
+    best_sequence::Vector{String}
 end
 
 function init_optimizer!(opt::GeneticOptimizer)
@@ -69,9 +71,9 @@ function init_optimizer!(opt::GeneticOptimizer)
         random_sequence::Vector{String} = []
         for __ = 1:opt.params.sequence_length
             if isnothing(opt.action_params.action_probs)
-                push!(random_sequence, rand(all_actions(opt.action_params)))
+                push!(random_sequence, rand(opt.rng, all_actions(opt.action_params)))
             else
-                push!(random_sequence, sample(all_actions(opt.action_params), Weights(opt.action_params.action_probs)))
+                push!(random_sequence, sample(opt.rng, all_actions(opt.action_params), Weights(opt.action_params.action_probs)))
             end
         end
         push!(opt.population, random_sequence)
@@ -85,10 +87,9 @@ function evaluate_scores!(opt::GeneticOptimizer)::Tuple{Float64, Float64}
         net = construct_network(
             action_sequence=sequence,
             action_params=opt.action_params,
-            inputs=opt.inputs,
-            outputs=opt.outputs
+            features=opt.features,
         )
-        push!(opt.scores, opt.eval_func(net) + get_penalty(net, opt.network_penalties))
+        push!(opt.scores, opt.eval_func(net))
     end
 
     return maximum(opt.scores), Statistics.mean(opt.scores)
@@ -108,8 +109,8 @@ function select(opt::GeneticOptimizer)::Vector{String}
 end
 
 function crossover(opt::GeneticOptimizer, parent1::Vector{String}, parent2::Vector{String})::Vector{String}
-    if rand() < opt.crossover_rate
-        idx = rand(1:min(length(parent1), length(parent2)))
+    if rand(opt.rng) < opt.crossover_rate
+        idx = rand(opt.rng, 1:min(length(parent1), length(parent2)))
         child = [parent1[1:idx]; parent2[idx+1:end]]
         return child
     end
@@ -121,15 +122,15 @@ function mutate(opt::GeneticOptimizer, sequence::Vector{String})::Vector{String}
     mutated_sequence = copy(sequence)
     
     for _ = sequence
-        if rand() > opt.mutation_rate
+        if rand(opt.rng) > opt.mutation_rate
             continue
         end
 
-        idx = rand(1:length(mutated_sequence))
+        idx = rand(opt.rng, 1:length(mutated_sequence))
         if isnothing(opt.action_params.action_probs)
-            mutated_sequence[idx] = rand(all_actions(opt.action_params))
+            mutated_sequence[idx] = rand(opt.rng, all_actions(opt.action_params))
         else
-            mutated_sequence[idx] = sample(all_actions(opt.action_params), Weights(opt.action_params.action_probs))
+            mutated_sequence[idx] = sample(opt.rng, all_actions(opt.action_params), Weights(opt.action_params.action_probs))
         end
     end
     return mutated_sequence
@@ -151,9 +152,9 @@ end
 function adjust!(opt::GeneticOptimizer, diversity::Float64)
     operator = ""
     if isnothing(opt.params.operator_probs)
-        operator = rand(["mutation", "crossover", "tournament"])
+        operator = rand(opt.rng, ["mutation", "crossover", "tournament"])
     else
-        operator = sample(["mutation", "crossover", "tournament"], Weights(opt.params.operator_probs))
+        operator = sample(opt.rng, ["mutation", "crossover", "tournament"], Weights(opt.params.operator_probs))
     end
     
     direction = diversity < opt.params.diversity_target ? 1 : -1
@@ -251,7 +252,8 @@ function optimize!(opt::GeneticOptimizer)::GeneticResults
         best_score=opt.best_score_history[end],
         generations=generation,
         inflection_points=inflection_points,
-        best_network=best_network(opt)
+        best_network=best_network(opt),
+        best_sequence=opt.population[findmax(opt.scores)[2]]
     )
 end
 
@@ -262,8 +264,7 @@ function best_network(opt::GeneticOptimizer)::Network
     net = construct_network(
         action_sequence=sequence,
         action_params=opt.action_params,
-        inputs=opt.inputs,
-        outputs=opt.outputs
+        features=opt.features
     )
     return net
 end

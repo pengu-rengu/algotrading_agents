@@ -5,21 +5,21 @@ using Statistics
 
 export StrategyParams, generate_signals
 export backtest, BacktestResults
-export Network, NetworkPenalties, SwitchNode, ComparisonNode, LogicNode, evaluate!, init_roots!, reset_state!, switch_bfs, describe_network, get_penalty
+export Network, NetworkPenalties, SwitchNode, ComparisonNode, LogicNode, evaluate!, init_roots!, reset_state!, switch_bfs, get_penalty
 
 abstract type AbstractNode end
 
 mutable struct ComparisonNode <: AbstractNode
     input_feature::AbstractFeature
-    input_idx::Int
+    feature_idx::Int
     units::Int
     value::Bool
-    ComparisonNode(input_feature::AbstractFeature, input_idx::Int, units::Int) =
-    new(input_feature, input_idx, units, false)
+    ComparisonNode(input_feature::AbstractFeature, feature_idx::Int, units::Int) =
+    new(input_feature, feature_idx, units, false)
 end
 
 function evaluate!(comp::ComparisonNode, inputs::Vector{Float64})::Bool
-    input_value = inputs[comp.input_idx]
+    input_value = inputs[comp.feature_idx]
     if isa(comp.input_feature, ContinuousFeature)
         lower = units_to_value(comp.input_feature, comp.units)
         upper = units_to_value(comp.input_feature, comp.units + 1)
@@ -44,21 +44,16 @@ end
 @kwdef mutable struct SwitchNode
     input_node::LogicNode
     parent_switch::Union{SwitchNode, Nothing} = nothing
-    left::Union{SwitchNode, Float64, Nothing} = nothing
-    right::Union{SwitchNode, Float64, Nothing} = nothing
+    left::Union{SwitchNode, Bool, Nothing} = nothing
+    right::Union{SwitchNode, Bool, Nothing} = nothing
     value::Bool = false
 end
 
 @kwdef mutable struct Network
-    inputs::Vector{AbstractFeature}
-    outputs::Vector{AbstractFeature}
+    features::Vector{AbstractFeature}
     comparisons::Vector{ComparisonNode} = []
     nodes::Vector{LogicNode} = []
-    roots::Vector{Union{SwitchNode, Nothing}} = []
-end
-
-function init_roots!(net::Network)
-    net.roots = [nothing for _ = net.outputs]
+    output_root::Union{SwitchNode, Nothing} = nothing
 end
 
 function reset_state!(net::Network)
@@ -71,7 +66,7 @@ function reset_state!(net::Network)
     end
 end
 
-function evaluate!(net::Network, inputs::Vector{Float64})
+function evaluate!(net::Network, inputs::Vector{Float64})::Bool
     for comparison = net.comparisons
         evaluate!(comparison, inputs)
     end
@@ -80,57 +75,50 @@ function evaluate!(net::Network, inputs::Vector{Float64})
         evaluate!(node)
     end
 
-    outputs = []
-    for root = net.roots
-        if isnothing(root)
-            push!(outputs, 0)
-            continue
-        end
-
-        current::Union{SwitchNode, Float64, Nothing} = root
-
-        while isa(current, SwitchNode)
-            if current.input_node.value
-                current = current.right
-            else
-                current = current.left
-            end
-        end
-        if isnothing(current)
-            current = 0.0
-        end
-        push!(outputs, current)
+    if isnothing(net.output_root)
+        return false
     end
 
-    return outputs
+    current::Union{SwitchNode, Bool, Nothing} = net.output_root
+
+    while isa(current, SwitchNode)
+        if current.input_node.value
+            current = current.right
+        else
+            current = current.left
+        end
+    end
+
+    if isnothing(current)
+        return false
+    end
+
+    return current
 end
 
-function switch_bfs(net::Network)::Vector{Vector{SwitchNode}}
-    switches::Vector{Vector{SwitchNode}} = []
+function switch_bfs(net::Network)::Vector{SwitchNode}
+    if isnothing(net.output_root)
+        return []
+    end
+
+    switches::Vector{SwitchNode} = []
     
-    for root = net.roots
-        push!(switches, [])
-        if isnothing(root)
-            continue
-        end
-
-        level = [root]
-        while length(level) > 0
-            next_level::Vector{SwitchNode} = []
-            for switch = level
-                push!(switches[end], switch)
-                if isa(switch.left, SwitchNode)
-                    push!(next_level, switch.left)
-                end
-
-                if isa(switch.right, SwitchNode)
-                    push!(next_level, switch.right)
-                end
+    level = [net.output_root]
+    while length(level) > 0
+        next_level::Vector{SwitchNode} = []
+        for switch = level
+            push!(switches, switch)
+            if isa(switch.left, SwitchNode)
+                push!(next_level, switch.left)
             end
 
-            level = next_level
-
+            if isa(switch.right, SwitchNode)
+                push!(next_level, switch.right)
+            end
         end
+
+        level = next_level
+
     end
 
     return switches
@@ -150,8 +138,8 @@ end
 
 function get_penalty(net::Network, penalties::NetworkPenalties)::Float64
     penalty = penalties.comparison_penalty * length(net.comparisons)
-    penalty += net.params.node_penalty * length(net.nodes)
-    penalty += net.params.switch_penalty * length(vcat(switch_bfs(net)))
+    penalty += penalties.node_penalty * length(net.nodes)
+    penalty += penalties.switch_penalty * length(switch_bfs(net))
 
     if penalties.useless_comparison_penalty > 0.0
         unused_comparisons = copy(net.comparisons)
@@ -187,7 +175,7 @@ function get_penalty(net::Network, penalties::NetworkPenalties)::Float64
     end
 
     if penalties.used_feature_penalty > 0.0 || penalties.used_feature_penalty > 0.0
-        unused_features = copy(net.inputs)
+        unused_features = copy(net.features)
         for comparison = net.comparisons
             idx = findfirst(isequal(comparison.input_feature), unused_features)
             if !isnothing(idx)
@@ -195,111 +183,28 @@ function get_penalty(net::Network, penalties::NetworkPenalties)::Float64
             end
         end
         penalty += penalties.unused_feature_penalty * length(unused_features)
-        penalty += penalties.used_feature_penalty * (length(net.inputs) - length(unused_features))
+        penalty += penalties.used_feature_penalty * (length(net.features) - length(unused_features))
     end
-    
+
     return penalty
-end
-
-function describe_network(net::Network)::String
-
-    io = IOBuffer()
-
-    println(io, "Comparisons")
-    println(io)
-
-    comparison_indices = Dict{ComparisonNode, Int}()
-
-    for i = eachindex(net.comparisons)
-        comparison = net.comparisons[i]
-        comparison_indices[comparison] = i
-        println(io, "comparison ", i)
-        println(io, "input index ", comparison.input_idx)
-        println(io, "units ", comparison.units)
-        println(io)
-    end
-
-    node_indices = Dict{LogicNode, Int}()
-
-    for i = eachindex(net.nodes)
-        node_indices[net.nodes[i]] = i
-    end
-
-    println(io, "Nodes")
-    println(io)
-
-    for node = net.nodes
-        println(io, "node ", node_indices[node])
-        if isnothing(node.in1)
-            println(io, "in1: nothing")
-        elseif isa(node.in1, LogicNode)
-            println(io, "in1: node ", node_indices[node.in1])
-        elseif isa(node.in1, ComparisonNode)
-            println(io, "in1: comparison ", comparison_indices[node.in1])
-        end
-
-        if isnothing(node.in2)
-            println(io, "in2: nothing")
-        elseif isa(node.in2, LogicNode)
-            println(io, "in2: node ", node_indices[node.in2])
-        elseif isa(node.in2, ComparisonNode)
-            println(io, "in2: comparison ", comparison_indices[node.in2])
-        end
-
-        println(io)
-    end
-
-    all_switches = switch_bfs(net)
-
-    for i = eachindex(all_switches)
-        println(io, "Output ", i, " switch tree")
-        println(io)
-
-        output_switches = all_switches[i]
-
-        switch_indices = Dict{SwitchNode, Int}()
-
-        for i = eachindex(output_switches)
-            switch_indices[output_switches[i]] = i
-        end
-
-        for switch = output_switches
-            println(io, "switch ", switch_indices[switch])
-            println(io, "input node: node ", node_indices[switch.input_node])
-
-            if isa(switch.left, SwitchNode)
-                println(io, "left: switch ", switch_indices[switch.left])
-            else
-                println(io, "left: ", switch.left)
-            end
-
-            if isa(switch.right, SwitchNode)
-                println(io, "right: switch ", switch_indices[switch.right])
-            else
-                println(io, "right: ", switch.right)
-            end
-
-            println(io)
-        end
-    end
-
-    return String(take!(io))
 end
 
 @kwdef struct StrategyParams
     network_penalties::NetworkPenalties
+    stop_loss::Union{Nothing, Float64}
+    take_profit::Union{Nothing, Float64}
+    max_holding_time::Union{Nothing, Int}
 end
 
-function generate_signals(net::Network, prices::Vector{Float64}, features::Vector{InputFeature})::Vector{Tuple{Bool, Bool}}
+function generate_signals(net::Network, prices::Vector{Float64}, features::Vector{InputFeature})::Vector{Bool}
     feature_values = [get_values(feature, prices) for feature = features]
     feature_values = [[inner[i] for inner = feature_values] for i = 1:length(feature_values[1])]
-    signals::Vector{Tuple{Bool, Bool}} = []
+    signals::Vector{Bool} = []
     
     reset_state!(net)
 
     for i = eachindex(feature_values)
-        result = evaluate!(net, feature_values[i])
-        push!(signals, (result[1] > 0.5, result[2] > 0.5))
+        push!(signals, evaluate!(net, feature_values[i]))
     end
 
     return signals
@@ -313,7 +218,7 @@ end
     is_invalid::Bool
 end
 
-function backtest(signals::Vector{Tuple{Bool, Bool}}, prices::Vector{Float64}; detailed_results::Bool = false)::Union{Float64, BacktestResults}
+function backtest(signals::Vector{Bool}, prices::Vector{Float64}, strategy_params::StrategyParams; detailed_results::Bool = false)::Union{Float64, BacktestResults}
     
     balance = 5000.0
     enter_price = -1.0
@@ -324,11 +229,15 @@ function backtest(signals::Vector{Tuple{Bool, Bool}}, prices::Vector{Float64}; d
 
     for i = eachindex(prices)[3:end]
         
-        if signals[i][1] && enter_price > 0
+        max_holding_time = isnothing(strategy_params.max_holding_time) ? false : i - enter_index > strategy_params.max_holding_time
+        take_profit = isnothing(strategy_params.take_profit) ? false : prices[i] / enter_price > 1 + strategy_params.take_profit
+        stop_loss = isnothing(strategy_params.stop_loss) ? false : prices[i] / enter_price < 1 - strategy_params.stop_loss
+
+        if enter_price > 0 && (signals[i] || max_holding_time || take_profit || stop_loss)
             balance += prices[i] - enter_price
             enter_price = -1
             push!(holding_times, i - enter_index)
-        elseif signals[i][2] && enter_price < 0
+        elseif signals[i] && enter_price < 0
             enter_price = prices[i]
             entries += 1
             enter_index = i
